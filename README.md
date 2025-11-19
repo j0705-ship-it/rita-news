@@ -131,6 +131,24 @@ vercel deploy
 
 ## Vercelデプロイ
 
+### Node.jsバージョンとRuntime設定
+
+このプロジェクトでは、以下の設定を使用しています：
+
+- **Node.jsバージョン**: `>=20.0.0`（`package.json`の`engines.node`で指定）
+- **API Route Runtime**: `nodejs`（各APIルートで`export const runtime = 'nodejs'`として指定）
+- **Vercel Functions Runtime**: Vercelが`package.json`の`engines.node`設定を自動認識し、Node.js 20.xを使用
+
+**設定の場所:**
+- `package.json`: `"engines": { "node": ">=20.0.0" }`
+- `app/api/**/route.ts`: `export const runtime = 'nodejs'`
+- `vercel.json`: Cron設定のみ（functions設定は不要）
+
+**注意事項:**
+- Next.js App Routerでは、`export const runtime`で`nodejs`を指定する必要があります
+- `nodejs20.x`などの具体的なバージョンはNext.jsのビルド時にサポートされていないため、`nodejs`を使用してください
+- Vercelは`package.json`の`engines.node`設定に基づいて適切なNode.jsバージョンを自動選択します
+
 ### 1. プロジェクトの作成
 
 1. Vercelダッシュボード（https://vercel.com）にログイン
