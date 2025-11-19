@@ -12,10 +12,6 @@
  */
 
 // Node.js 18+ の組み込みfetchを使用
-declare global {
-  function fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
-}
-
 const args = process.argv.slice(2);
 
 if (args.length === 0) {

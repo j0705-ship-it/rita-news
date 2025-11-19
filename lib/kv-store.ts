@@ -1,12 +1,12 @@
 import { kv } from '@vercel/kv';
 import { Article } from '../types/article';
 import { format } from 'date-fns';
-import { toZonedTime } from 'date-fns-tz';
+import { utcToZonedTime } from 'date-fns-tz';
 
 const TTL = 86400; // 24 hours in seconds
 
 export function getDateKey(date: Date = new Date()): string {
-  const jstDate = toZonedTime(date, 'Asia/Tokyo');
+  const jstDate = utcToZonedTime(date, 'Asia/Tokyo');
   return format(jstDate, 'yyyy-MM-dd');
 }
 
