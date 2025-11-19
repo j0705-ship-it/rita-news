@@ -1,0 +1,41 @@
+{
+  "name": "rita-news",
+  "version": "1.0.0",
+  "description": "業種別ニュース取得・要約システム",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "type-check": "tsc --noEmit",
+    "check": "npm run build",
+    "health:local": "node -e \"fetch('http://localhost:3000/api/health').then(r=>r.json()).then(d=>console.log(JSON.stringify(d,null,2))).catch(console.error)\"",
+    "check:feed": "ts-node --project tsconfig.scripts.json scripts/check-feed.ts"
+  },
+  "dependencies": {
+    "next": "^14.0.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "@vercel/kv": "^1.0.0",
+    "openai": "^4.28.0",
+    "fast-xml-parser": "^4.3.2",
+    "date-fns": "^2.30.0",
+    "date-fns-tz": "^2.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.45",
+    "@types/react-dom": "^18.2.18",
+    "typescript": "^5.3.3",
+    "tailwindcss": "^3.4.0",
+    "postcss": "^8.4.32",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^8.56.0",
+    "eslint-config-next": "^14.0.4",
+    "ts-node": "^10.9.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+
