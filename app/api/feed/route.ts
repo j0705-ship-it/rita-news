@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getArticles, saveArticles } from '@/lib/kv-store';
 import { fetchGoogleNewsRSS } from '@/lib/rss';
-import { filterArticles, generateArticleId } from '@/lib/article-normalizer';
-import { generateSummaries } from '@/lib/openai-client';
+import { filterArticles, generateArticleId, dedupeArticles, clusterSimilarArticles, dedupeByTitle } from '@/lib/article-normalizer';
+import { evaluateArticles } from '@/lib/news-evaluator';
 import { FeedResponse, ArticleWithSummary, Article } from '@/types/article';
 
 export const runtime = 'nodejs';
@@ -84,7 +84,7 @@ export async function GET(request: NextRequest) {
 
     console.log(`[FEED] 処理キーワード: ${keywords.join(', ')}`);
 
-    const allArticles: ArticleWithSummary[] = [];
+    let allArticles: ArticleWithSummary[] = [];
 
     for (const keyword of keywords) {
       try {
@@ -169,40 +169,65 @@ export async function GET(request: NextRequest) {
           }
         }
 
-        // 要約生成
+        // 評価・要約生成
         if (articles.length > 0) {
-          let articlesWithSummary: ArticleWithSummary[];
+          let evaluatedArticles: ArticleWithSummary[];
           
-          if (process.env.OPENAI_API_KEY) {
-            try {
-              console.log(`[FEED] 要約生成開始: ${keyword} - ${articles.length}件`);
-              articlesWithSummary = await generateSummaries(articles);
-              console.log(`[FEED] 要約生成完了: ${keyword} - ${articlesWithSummary.length}件`);
-            } catch (summaryError) {
-              console.error(`[FEED] 要約生成エラー: ${keyword}`, summaryError);
-              if (summaryError instanceof Error && summaryError.stack) {
-                console.error(`[FEED] スタック:`, summaryError.stack);
-              }
-              // 要約エラー時は要約なしで返す
-              articlesWithSummary = articles.map(article => ({
-                ...article,
-                summary: ''
-              }));
+          try {
+            console.log(`[FEED] 評価・要約生成開始: ${keyword} - ${articles.length}件`);
+            evaluatedArticles = await evaluateArticles(articles, keyword);
+            
+            // keep=trueの記事だけ残す
+            const keptArticles = evaluatedArticles.filter(article => article.keep === true);
+            console.log(`[FEED] 評価完了: ${keyword} - 全体 ${evaluatedArticles.length}件、保持 ${keptArticles.length}件`);
+            
+            // importanceScore + relevanceScore の降順で並べ替え
+            keptArticles.sort((a, b) => {
+              const scoreA = (a.importanceScore || 0) + (a.relevanceScore || 0);
+              const scoreB = (b.importanceScore || 0) + (b.relevanceScore || 0);
+              return scoreB - scoreA;
+            });
+            
+            // タイトル完全一致による重複除去（最初の1件を保持）
+            const beforeTitleDedupeCount = keptArticles.length;
+            const titleDeduplicatedArticles = dedupeByTitle(keptArticles);
+            const afterTitleDedupeCount = titleDeduplicatedArticles.length;
+            if (isDev && beforeTitleDedupeCount > afterTitleDedupeCount) {
+              console.log(`[FEED] ${keyword}: タイトル重複除去 ${beforeTitleDedupeCount}件 → ${afterTitleDedupeCount}件 (${beforeTitleDedupeCount - afterTitleDedupeCount}件除去)`);
             }
-          } else {
-            console.log(`[FEED] OpenAI API Key未設定、要約をスキップ: ${keyword}`);
-            articlesWithSummary = articles.map(article => ({
+            
+            // URL重複除去（keywordセクションごと）
+            const beforeUrlDedupeCount = titleDeduplicatedArticles.length;
+            const urlDeduplicatedArticles = dedupeArticles(titleDeduplicatedArticles);
+            const afterUrlDedupeCount = urlDeduplicatedArticles.length;
+            if (isDev && beforeUrlDedupeCount > afterUrlDedupeCount) {
+              console.log(`[FEED] ${keyword}: URL重複除去 ${beforeUrlDedupeCount}件 → ${afterUrlDedupeCount}件 (${beforeUrlDedupeCount - afterUrlDedupeCount}件除去)`);
+            }
+            
+            // タイトル類似度によるトピック重複除去（同じ出来事を1件にまとめる）
+            const beforeClusterCount = urlDeduplicatedArticles.length;
+            const clusteredArticles = clusterSimilarArticles(urlDeduplicatedArticles, 0.75, isDev);
+            const afterClusterCount = clusteredArticles.length;
+            if (isDev && beforeClusterCount > afterClusterCount) {
+              console.log(`[FEED] ${keyword}: トピック重複除去 ${beforeClusterCount}件 → ${afterClusterCount}件 (${beforeClusterCount - afterClusterCount}件除去)`);
+            } else if (isDev) {
+              console.log(`[FEED] ${keyword}: トピック重複除去 ${beforeClusterCount}件 → ${afterClusterCount}件 (重複なし)`);
+            }
+            
+            allArticles.push(...clusteredArticles.map(article => ({
               ...article,
-              summary: ''
-            }));
+              category: keyword
+            })));
+            
+            console.log(`[FEED] キーワード処理完了: ${keyword} - ${clusteredArticles.length}件`);
+          } catch (evalError) {
+            console.error(`[FEED] 評価エラー: ${keyword}`, evalError);
+            if (evalError instanceof Error && evalError.stack) {
+              console.error(`[FEED] スタック:`, evalError.stack);
+            }
+            // 評価エラー時は空配列（記事を表示しない）
+            console.log(`[FEED] 評価エラーのため記事を除外: ${keyword}`);
           }
-
-          allArticles.push(...articlesWithSummary.map(article => ({
-            ...article,
-            category: keyword
-          })));
-          
-          console.log(`[FEED] キーワード処理完了: ${keyword} - ${articlesWithSummary.length}件`);
         } else {
           console.log(`[FEED] 記事なし: ${keyword}`);
         }
@@ -215,8 +240,41 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // 日付でソート
+    // 全体でタイトル完全一致による重複除去
+    const beforeTitleDedupeCount = allArticles.length;
+    allArticles = dedupeByTitle(allArticles);
+    const afterTitleDedupeCount = allArticles.length;
+    
+    if (isDev && beforeTitleDedupeCount > afterTitleDedupeCount) {
+      console.log(`[FEED] 全体タイトル重複除去: ${beforeTitleDedupeCount}件 → ${afterTitleDedupeCount}件 (${beforeTitleDedupeCount - afterTitleDedupeCount}件除去)`);
+    }
+    
+    // 全体でURL重複除去（複数keywordで同じ記事が含まれる可能性があるため）
+    const beforeUrlDedupeCount = allArticles.length;
+    allArticles = dedupeArticles(allArticles);
+    const afterUrlDedupeCount = allArticles.length;
+    
+    if (isDev && beforeUrlDedupeCount > afterUrlDedupeCount) {
+      console.log(`[FEED] 全体URL重複除去: ${beforeUrlDedupeCount}件 → ${afterUrlDedupeCount}件 (${beforeUrlDedupeCount - afterUrlDedupeCount}件除去)`);
+    }
+    
+    // 全体でトピック重複除去（同じトピックの記事を1件にまとめる）
+    const beforeClusterCount = allArticles.length;
+    allArticles = clusterSimilarArticles(allArticles, 0.75, isDev);
+    const afterClusterCount = allArticles.length;
+    
+    if (isDev && beforeClusterCount > afterClusterCount) {
+      console.log(`[FEED] 全体トピック重複除去: ${beforeClusterCount}件 → ${afterClusterCount}件 (${beforeClusterCount - afterClusterCount}件除去)`);
+    }
+
+    // importanceScore + relevanceScore の降順で並べ替え（既にソート済みだが、全体で再ソート）
     allArticles.sort((a, b) => {
+      const scoreA = (a.importanceScore || 0) + (a.relevanceScore || 0);
+      const scoreB = (b.importanceScore || 0) + (b.relevanceScore || 0);
+      if (scoreB !== scoreA) {
+        return scoreB - scoreA;
+      }
+      // スコアが同じ場合は日付でソート
       try {
         return new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime();
       } catch {
@@ -227,24 +285,9 @@ export async function GET(request: NextRequest) {
     const duration = Date.now() - startTime;
     console.log(`[FEED] 処理完了: 合計 ${allArticles.length}件、所要時間 ${duration}ms`);
 
-    // 記事が0件の場合はダミー記事を1件返す（フォールバック）
+    // 記事が0件の場合のメッセージ（ダミー記事は返さない）
     if (allArticles.length === 0 && keywords.length > 0) {
-      const firstKeyword = keywords[0];
-      console.warn(`[FEED] 記事が0件のため、ダミー記事を返します: ${firstKeyword}`);
-      
-      const dummyArticle: ArticleWithSummary = {
-        id: 'dummy-article-fallback',
-        title: 'テスト記事',
-        link: 'https://example.com',
-        description: 'これはテスト用のダミー記事です。実際の記事取得に失敗した場合に表示されます。',
-        pubDate: new Date().toISOString(),
-        source: 'テスト',
-        category: firstKeyword,
-        fetchedAt: new Date().toISOString(),
-        summary: 'RSS取得に失敗したため、テスト用記事を表示しています。'
-      };
-      
-      allArticles.push(dummyArticle);
+      console.log(`[FEED] 記事が0件: 広告・求人・ブログ等を除外したため記事がありません`);
     }
 
     const response: FeedResponse = {
@@ -253,10 +296,7 @@ export async function GET(request: NextRequest) {
     };
 
     if (allArticles.length === 0) {
-      response.message = 'no articles';
-      if (isDev) {
-        response.debug = '記事が見つかりませんでした。ログを確認してください。';
-      }
+      response.message = '広告・求人・ブログ等を除外したため記事がありません';
     }
 
     return NextResponse.json(response, { status: 200 });
@@ -281,4 +321,5 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(response, { status: 200 });
   }
 }
+
 
